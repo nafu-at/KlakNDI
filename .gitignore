@@ -14,17 +14,9 @@ Desktop.ini
 /.vs
 
 # Unity
-/Library
-/Logs
-/Temp
-/obj
-
-# Visual Studio
-/Plugin/Windows/.vs
-/Plugin/Windows/x64
-/Plugin/Windows/Win32
-*.vcxproj.user
-
-# Xcode
-xcuserdata
-xcshareddata
+/*/Library
+/*/Logs
+/*/Recordings
+/*/UserSettings
+/*/Temp
+/*/*.blob
