@@ -1,234 +1,300 @@
-using Unity.Collections.LowLevel.Unsafe;
 using UnityEngine;
 using UnityEngine.Rendering;
 
 namespace Klak.Ndi {
 
-[ExecuteInEditMode]
-public sealed partial class NdiSender : MonoBehaviour
-{
-    #region Internal objects
-
-    int _width, _height;
-    Interop.Send _send;
-    FormatConverter _converter;
-    MetadataQueue _metadataQueue = new MetadataQueue();
-    System.Action<AsyncGPUReadbackRequest> _onReadback;
-
-    void PrepareInternalObjects()
+    [ExecuteInEditMode]
+    public sealed partial class NdiSender : MonoBehaviour
     {
-        if (_send == null)
-            _send = _captureMethod == CaptureMethod.GameView ?
-              SharedInstance.GameViewSend : Interop.Send.Create(_ndiName);
-        if (_converter == null) _converter = new FormatConverter(_resources);
-        if (_onReadback == null) _onReadback = OnReadback;
-    }
+    #region Sender objects
 
-    void ReleaseInternalObjects()
-    {
-        if (_send != null && !SharedInstance.IsGameViewSend(_send))
-            _send.Dispose();
-        _send = null;
+        Interop.Send _send;
+        ReadbackPool _pool;
+        FormatConverter _converter;
+        System.Action<AsyncGPUReadbackRequest> _onReadback;
 
-        _converter?.Dispose();
-        _converter = null;
-    }
+        void PrepareSenderObjects()
+        {
+            // Game view capture method: Borrow the shared sender instance.
+            if (_send == null && captureMethod == CaptureMethod.GameView)
+                _send = SharedInstance.GameViewSend;
+
+            // Private object initialization
+            if (_send == null) _send = Interop.Send.Create(ndiName);
+            if (_pool == null) _pool = new ReadbackPool();
+            if (_converter == null) _converter = new FormatConverter(_resources);
+            if (_onReadback == null) _onReadback = OnReadback;
+        }
+
+        void ReleaseSenderObjects()
+        {
+            // Total synchronization: This may cause a frame hiccup, but it's
+            // needed to dispose the readback buffers safely.
+            AsyncGPUReadback.WaitAllRequests();
+
+            // Game view capture method: Leave the sender instance without
+            // disposing (we're not the owner) but synchronize it. It's needed to
+            // dispose the readback buffers safely too.
+            if (SharedInstance.IsGameViewSend(_send))
+            {
+                _send.SendVideoAsync(); // Sync by null-send
+                _send = null;
+            }
+
+            // Private objet disposal
+            _send?.Dispose();
+            _send = null;
+
+            _pool?.Dispose();
+            _pool = null;
+
+            _converter?.Dispose();
+            _converter = null;
+
+            // We don't dispose _onReadback because it's reusable.
+        }
 
     #endregion
 
-    #region Immediate capture methods
+    #region Capture coroutine for the Texture/GameView capture methods
 
-    ComputeBuffer CaptureImmediate()
-    {
-        PrepareInternalObjects();
-
-        // Texture capture method
-        // Simply convert the source texture and return it.
-        if (_captureMethod == CaptureMethod.Texture)
+        System.Collections.IEnumerator CaptureCoroutine()
         {
-            if (_sourceTexture == null) return null;
+            for (var eof = new WaitForEndOfFrame(); true;)
+            {
+                // Wait for the end of the frame.
+                yield return eof;
 
-            _width = _sourceTexture.width;
-            _height = _sourceTexture.height;
+                PrepareSenderObjects();
 
-            return _converter.Encode(_sourceTexture, _enableAlpha, true);
+                // Texture capture method
+                if (captureMethod == CaptureMethod.Texture && sourceTexture != null)
+                {
+                    var (w, h) = (sourceTexture.width, sourceTexture.height);
+
+                    // Pixel format conversion
+                    var buffer = _converter.Encode(sourceTexture, keepAlpha, true);
+
+                    // Readback entry allocation and request
+                    _pool.NewEntry(w, h, keepAlpha, metadata)
+                        .RequestReadback(buffer, _onReadback);
+                }
+
+                // Game View capture method
+                if (captureMethod == CaptureMethod.GameView)
+                {
+                    // Game View screen capture with a temporary RT
+                    var (w, h) = (Screen.width, Screen.height);
+                    var tempRT = RenderTexture.GetTemporary(w, h, 0);
+                    ScreenCapture.CaptureScreenshotIntoRenderTexture(tempRT);
+
+                    // Pixel format conversion
+                    var buffer = _converter.Encode(tempRT, keepAlpha, false);
+                    RenderTexture.ReleaseTemporary(tempRT);
+
+                    // Readback entry allocation and request
+                    _pool.NewEntry(w, h, keepAlpha, metadata)
+                        .RequestReadback(buffer, _onReadback);
+                }
+            }
         }
-
-        // Game View capture method
-        // Capture the screen into a temporary RT, then convert it.
-        if (_captureMethod == CaptureMethod.GameView)
-        {
-            _width = Screen.width;
-            _height = Screen.height;
-
-            var tempRT = RenderTexture.GetTemporary(_width, _height, 0);
-
-            ScreenCapture.CaptureScreenshotIntoRenderTexture(tempRT);
-            var converted = _converter.Encode(tempRT, _enableAlpha, false);
-
-            RenderTexture.ReleaseTemporary(tempRT);
-            return converted;
-        }
-
-        Debug.LogError("Wrong capture method.");
-        return null;
-    }
-
-    // Capture coroutine: At the end of every frames, it captures the source
-    // frame, convert it to the NDI frame format, then request GPU readback.
-    System.Collections.IEnumerator ImmediateCaptureCoroutine()
-    {
-        for (var eof = new WaitForEndOfFrame(); true;)
-        {
-            yield return eof;
-
-            var converted = CaptureImmediate();
-            if (converted == null) continue;
-
-            AsyncGPUReadback.Request(converted, _onReadback);
-            _metadataQueue.Enqueue(metadata);
-        }
-    }
 
     #endregion
 
-    #region SRP camera capture callback
+    #region SRP camera capture callback for the Camera capture method
 
-    void OnCameraCapture(RenderTargetIdentifier source, CommandBuffer cb)
-    {
-        // NOTE: In some corner cases, this callback is called after object
-        // destruction. To avoid these cases, we check the _attachedCamera
-        // value and return if it's null. See ResetState() for details.
-        if (_attachedCamera == null) return;
+        void OnCameraCapture(RenderTargetIdentifier source, CommandBuffer cb)
+        {
+            // A SRP may call this callback after object destruction. We can
+            // exclude those cases by null-checking _attachedCamera.
+            if (_attachedCamera == null) return;
 
-        PrepareInternalObjects();
+            PrepareSenderObjects();
 
-        _width = _sourceCamera.pixelWidth;
-        _height = _sourceCamera.pixelHeight;
+            // Pixel format conversion
+            var (w, h) = (sourceCamera.pixelWidth, sourceCamera.pixelHeight);
+            var buffer = _converter.Encode(cb, source, w, h, keepAlpha, true);
 
-        // Pixel format conversion
-        var converted = _converter.Encode
-          (cb, source, _width, _height, _enableAlpha, true);
-
-        // GPU readback request
-        cb.RequestAsyncReadback(converted, _onReadback);
-        _metadataQueue.Enqueue(metadata);
-    }
+            // Readback entry allocation and request
+            _pool.NewEntry(w, h, keepAlpha, metadata)
+                .RequestReadback(buffer, _onReadback);
+        }
 
     #endregion
 
     #region GPU readback completion callback
 
-    unsafe void OnReadback(AsyncGPUReadbackRequest request)
-    {
-        // Metadata retrieval
-        using (var metadata = _metadataQueue.Dequeue())
+        unsafe void OnReadback(AsyncGPUReadbackRequest req)
         {
-            // Ignore errors.
-            if (request.hasError) return;
+            // Readback entry retrieval
+            var entry = _pool.FindEntry(req.GetData<byte>());
+            if (entry == null) return;
 
-            // Ignore it if the NDI object has been already disposed.
-            if (_send == null || _send.IsInvalid || _send.IsClosed) return;
+            // Invalid state detection
+            if (req.hasError || _send == null || _send.IsInvalid || _send.IsClosed)
+            {
+                // Do nothing but release the readback entry.
+                _pool.Free(entry);
+                return;
+            }
 
-            // Pixel format (depending on alpha mode)
-            var fourcc = _enableAlpha ?
-              Interop.FourCC.UYVA : Interop.FourCC.UYVY;
-
-            // Readback data retrieval
-            var data = request.GetData<byte>();
-            var pdata = NativeArrayUnsafeUtility.GetUnsafeReadOnlyPtr(data);
-
-            // Data size verification
-            if (data.Length / sizeof(uint) !=
-                Util.FrameDataCount(_width, _height, _enableAlpha)) return;
-
-            // Frame data setup
+            // Frame data
             var frame = new Interop.VideoFrame
-              { Width = _width, Height = _height, LineStride = _width * 2,
-                FourCC = _enableAlpha ?
-                  Interop.FourCC.UYVA : Interop.FourCC.UYVY,
+            {
+                Width = entry.Width,
+                Height = entry.Height,
+                LineStride = entry.Stride,
+                FourCC = entry.FourCC,
                 FrameFormat = Interop.FrameFormat.Progressive,
-                Data = (System.IntPtr)pdata, Metadata = metadata };
+                Data = entry.ImagePointer,
+                _Metadata = entry.MetadataPointer
+            };
 
-            // Send via NDI
+            // Async-send initiation
+            // This causes a synchronization for the last frame -- i.e., It locks
+            // the thread if the last frame is still under processing.
             _send.SendVideoAsync(frame);
+
+            // We don't need the last frame anymore. Free it.
+            _pool.FreeMarkedEntry();
+
+            // Mark this frame to get freed in the next frame.
+            _pool.Mark(entry);
         }
-    }
 
     #endregion
 
     #region Component state controller
 
-    Camera _attachedCamera;
+        Camera _attachedCamera;
 
-    // Reset the component state without disposing the NDI send object.
-    internal void ResetState(bool willBeActive)
-    {
-        // Disable the subcomponents.
-        StopAllCoroutines();
-
-        //
-        // Remove the capture callback from the camera.
-        //
-        // NOTE: We're not able to remove the capture callback correcly when
-        // the camera has been destroyed because we end up with getting a null
-        // reference from _attachedCamera. To avoid causing issues in the
-        // callback, we make sure that _attachedCamera has a null reference.
-        //
-        if (_attachedCamera != null)
+        // Component state reset without NDI object disposal
+        internal void ResetState(bool willBeActive)
         {
+            // Camera capture coroutine termination
+            // We use this to kill only a single coroutine. It may sound like
+            // overkill, but I think there is no side effect in doing so.
+            StopAllCoroutines();
+
         #if KLAK_NDI_HAS_SRP
-            CameraCaptureBridge.RemoveCaptureAction
-              (_attachedCamera, OnCameraCapture);
+
+        // A SRP may call this callback after camera destruction. We can
+        // exclude those cases by null-checking _attachedCamera.
+        if (_attachedCamera != null)
+            CameraCaptureBridge.RemoveCaptureAction(_attachedCamera, OnCameraCapture);
+
         #endif
-        }
 
-        _attachedCamera = null;
+            _attachedCamera = null;
 
-        // The following blocks are to activate the subcomponents.
-        // We can return here if willBeActive is false.
-        if (!willBeActive) return;
+            // The following part of code is to activate the subcomponents. We can
+            // break here if willBeActive is false.
+            if (!willBeActive) return;
 
-        if (_captureMethod == CaptureMethod.Camera)
-        {
-            // Enable the camera capture callback.
-            if (_sourceCamera != null)
+            if (captureMethod == CaptureMethod.Camera)
             {
-                _attachedCamera = _sourceCamera;
             #if KLAK_NDI_HAS_SRP
-                CameraCaptureBridge.AddCaptureAction
-                  (_attachedCamera, OnCameraCapture);
+
+            // Camera capture callback setup
+            if (sourceCamera != null)
+                CameraCaptureBridge.AddCaptureAction(sourceCamera, OnCameraCapture);
+
             #endif
+
+                _attachedCamera = sourceCamera;
+            }
+            else
+            {
+                // Capture coroutine initiation
+                StartCoroutine(CaptureCoroutine());
             }
         }
-        else
+
+        // Component state reset with NDI object disposal
+        internal void Restart(bool willBeActivate)
         {
-            // Enable the immediate capture coroutine.
-            StartCoroutine(ImmediateCaptureCoroutine());
+            ResetState(willBeActivate);
+            ReleaseSenderObjects();
         }
-    }
 
-    // Reset the component state and dispose the NDI send object.
-    internal void Restart(bool willBeActivate)
-    {
-        ResetState(willBeActivate);
-        ReleaseInternalObjects();
-    }
-
-    internal void ResetState() => ResetState(isActiveAndEnabled);
-    internal void Restart() => Restart(isActiveAndEnabled);
+        internal void ResetState() => ResetState(isActiveAndEnabled);
+        internal void Restart() => Restart(isActiveAndEnabled);
 
     #endregion
 
     #region MonoBehaviour implementation
 
-    void OnEnable() => ResetState();
-
-    void OnDisable() => Restart(false);
-
-    void OnDestroy() => Restart(false);
+        void OnEnable() => ResetState();
+        void OnDisable() => Restart(false);
+        void OnDestroy() => Restart(false);
 
     #endregion
-}
+
+    #region Sound Sender
+        private int numSamples = 0;
+        private int numChannels = 0;
+        private float[] samples = new float[1];
+
+        private void OnAudioFilterRead(float[] data, int channels)
+        {
+            if (data.Length == 0 || channels == 0) return;
+
+            unsafe
+            {
+                bool settingsChanged = false;
+                int tempSamples = data.Length / channels;
+
+                if (tempSamples != numSamples)
+                {
+                    settingsChanged = true;
+                    numSamples = tempSamples;
+                    //PluginEntry.SetNumSamples(_plugin, numSamples);
+                }
+
+                if (channels != numChannels)
+                {
+                    settingsChanged = true;
+                    numChannels = channels;
+                    //PluginEntry.SetAudioChannels(_plugin, channels);
+                }
+
+                if (settingsChanged)
+                {
+                    System.Array.Resize<float>(ref samples, numSamples * numChannels);
+                }
+
+                for (int ch = 0; ch < numChannels; ch++)
+                {
+                    for (int i = 0; i < numSamples; i++)
+                    {
+                        samples[numSamples * ch + i] = data[i * numChannels];
+                    }
+                }
+
+                fixed (float* p = samples)
+                {
+                    //PluginEntry.SetAudioData(_plugin, (IntPtr)p);
+                    var frame = new Interop.AudioFrame
+                    {
+                        SampleRate = 48000,
+                        NoChannels = channels,
+                        NoSamples = numSamples,
+                        ChannelStrideInBytes = numSamples * sizeof(float),
+                        Data = (System.IntPtr)p
+                    };
+
+                    if (_send != null)
+                    {
+                        _send.SendAudio(frame);
+                    }
+                }
+
+                //if (audioEnabled && pluginReady) PluginEntry.SendAudio(_plugin);
+            }
+        }
+
+    #endregion
 
 }
+
+} // namespace Klak.Ndi

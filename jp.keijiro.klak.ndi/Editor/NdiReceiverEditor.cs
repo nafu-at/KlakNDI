@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEditor;
+using System.Linq;
 
 namespace Klak.Ndi.Editor {
 
@@ -7,30 +8,32 @@ namespace Klak.Ndi.Editor {
 [CustomEditor(typeof(NdiReceiver))]
 sealed class NdiReceiverEditor : UnityEditor.Editor
 {
-    SerializedProperty _ndiName;
-    SerializedProperty _targetTexture;
-    SerializedProperty _targetRenderer;
-    SerializedProperty _targetMaterialProperty;
-
-    static class Styles
+    static class Labels
     {
+        public static Label NdiName = "NDI Name";
         public static Label Property = "Property";
         public static Label Select = "Select";
     }
 
-    // Create and show the source name dropdown.
+    #pragma warning disable CS0649
+
+    AutoProperty _ndiName;
+    AutoProperty _targetTexture;
+    AutoProperty _targetRenderer;
+    AutoProperty _targetMaterialProperty;
+
+    #pragma warning restore
+
+    // NDI name dropdown
     void ShowNdiNameDropdown(Rect rect)
     {
         var menu = new GenericMenu();
-        var sources = SharedInstance.Find.CurrentSources;
+        var sources = NdiFinder.sourceNames;
 
-        if (sources.Length > 0)
+        if (sources.Any())
         {
-            foreach (var source in sources)
-            {
-                var name = source.NdiName;
-                menu.AddItem(new GUIContent(name), false, OnSelectSource, name);
-            }
+            foreach (var name in sources)
+                menu.AddItem(new GUIContent(name), false, OnSelectName, name);
         }
         else
         {
@@ -40,29 +43,15 @@ sealed class NdiReceiverEditor : UnityEditor.Editor
         menu.DropDown(rect);
     }
 
-    // Source name selection callback
-    void OnSelectSource(object name)
+    // NDI source name selection callback
+    void OnSelectName(object name)
     {
         serializedObject.Update();
-        _ndiName.stringValue = (string)name;
+        _ndiName.Target.stringValue = (string)name;
         serializedObject.ApplyModifiedProperties();
-        RequestRestart();
     }
 
-    // Request receiver restart.
-    void RequestRestart()
-    {
-        foreach (NdiReceiver receiver in targets) receiver.Restart();
-    }
-
-    void OnEnable()
-    {
-        var finder = new PropertyFinder(serializedObject);
-        _ndiName = finder["_ndiName"];
-        _targetTexture = finder["_targetTexture"];
-        _targetRenderer = finder["_targetRenderer"];
-        _targetMaterialProperty = finder["_targetMaterialProperty"];
-    }
+    void OnEnable() => AutoProperty.Scan(this);
 
     public override void OnInspectorGUI()
     {
@@ -70,31 +59,29 @@ sealed class NdiReceiverEditor : UnityEditor.Editor
 
         EditorGUILayout.BeginHorizontal();
 
-        // Source name text field
-        EditorGUI.BeginChangeCheck();
-        EditorGUILayout.DelayedTextField(_ndiName);
-        var restart = EditorGUI.EndChangeCheck();
+        // NDI Name
+        EditorGUILayout.DelayedTextField(_ndiName, Labels.NdiName);
 
-        // Source name dropdown
+        // NDI name dropdown
         var rect = EditorGUILayout.GetControlRect(false, GUILayout.Width(60));
-        if (EditorGUI.DropdownButton(rect, Styles.Select, FocusType.Keyboard))
+        if (EditorGUI.DropdownButton(rect, Labels.Select, FocusType.Keyboard))
             ShowNdiNameDropdown(rect);
 
         EditorGUILayout.EndHorizontal();
 
-        // Target texture/renderer
+        // Target Texture/Renderer
         EditorGUILayout.PropertyField(_targetTexture);
         EditorGUILayout.PropertyField(_targetRenderer);
 
         EditorGUI.indentLevel++;
 
-        if (_targetRenderer.hasMultipleDifferentValues)
+        if (_targetRenderer.Target.hasMultipleDifferentValues)
         {
             // Multiple renderers selected: Show the simple text field.
             EditorGUILayout.
-              PropertyField(_targetMaterialProperty, Styles.Property);
+              PropertyField(_targetMaterialProperty, Labels.Property);
         }
-        else if (_targetRenderer.objectReferenceValue != null)
+        else if (_targetRenderer.Target.objectReferenceValue != null)
         {
             // Single renderer: Show the material property selection dropdown.
             MaterialPropertySelector.
@@ -104,9 +91,7 @@ sealed class NdiReceiverEditor : UnityEditor.Editor
         EditorGUI.indentLevel--;
 
         serializedObject.ApplyModifiedProperties();
-
-        if (restart) RequestRestart();
     }
 }
 
-}
+} // namespace Klak.Ndi.Editor

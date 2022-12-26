@@ -40,8 +40,8 @@ public struct Source
     public IntPtr _NdiName;
     public IntPtr _UrlAddress;
 
-    public string NdiName => Marshal.PtrToStringAnsi(_NdiName);
-    public string UrlAddress => Marshal.PtrToStringAnsi(_UrlAddress);
+    public string NdiName => RecvHelper.GetStringData(_NdiName);
+    public string UrlAddress => RecvHelper.GetStringData(_UrlAddress);
 }
 
 [StructLayoutAttribute(LayoutKind.Sequential)]
@@ -55,8 +55,65 @@ public struct VideoFrame
     public long Timecode;
     public IntPtr Data;
     public int LineStride;
-    public IntPtr Metadata;
+    public IntPtr _Metadata;
     public long Timestamp;
+    
+    public string Metadata => RecvHelper.GetStringData(_Metadata);
+
+    public bool HasData => Data != IntPtr.Zero;
+
+    public override string ToString()
+    {
+        return $"{nameof(VideoFrame)}: [{Width},{Height}] Format: {FourCC} FrameRate: {FrameRateN / (float) FrameRateD} Aspect: {AspectRatio} Timecode: {Timecode} Timestamp: {Timestamp}";
+    }
+}
+[StructLayoutAttribute(LayoutKind.Sequential)]
+public struct AudioFrame // NDIlib_audio_frame_v2
+{
+    public int SampleRate;
+    public int NoChannels;
+    public int NoSamples;
+    public long Timecode;
+    public IntPtr Data;
+    public int ChannelStrideInBytes;
+    public IntPtr _Metadata;
+    public long Timestamp;
+
+    public string Metadata => RecvHelper.GetStringData(_Metadata);
+
+    public bool HasData => Data != IntPtr.Zero && NoSamples > 0;
+
+    public override string ToString()
+    {
+        return $"{nameof(AudioFrame)}: SampleRate: {SampleRate} Channels: {NoChannels} Samples: {NoSamples} Timecode: {Timecode} ChannelStride: {ChannelStrideInBytes} Timestamp: {Timestamp}";
+    }
+}
+
+[StructLayoutAttribute(LayoutKind.Sequential)]
+public struct AudioFrameInterleaved // NDIlib_audio_frame_interleaved_32f
+{
+    public int SampleRate;
+    public int NoChannels;
+    public int NoSamples;
+    public long Timecode;
+    public IntPtr Data;
+}
+
+[StructLayoutAttribute(LayoutKind.Sequential)]
+public struct MetadataFrame
+{
+    public int Length;
+    public long Timecode;
+    public IntPtr _Data;
+
+    public string Data => RecvHelper.GetStringData(_Data);
+
+    public bool HasData => _Data != IntPtr.Zero && Length > 0;
+
+    public override string ToString()
+    {
+        return $"{nameof(MetadataFrame)}: Length: {Length} Timecode: {Timecode} Data: {Data}";
+    }
 }
 
 [StructLayoutAttribute(LayoutKind.Sequential)]
