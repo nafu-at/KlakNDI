@@ -43,190 +43,163 @@ namespace Klak.Ndi
 
         #endregion
 
-        #region MonoBehaviour implementation
+	#region MonoBehaviour implementation
 
-        private CancellationTokenSource tokenSource;
-        private CancellationToken cancellationToken;
-        private static SynchronizationContext mainThreadContext;
-        private AudioClip audioClip;
+	private CancellationTokenSource tokenSource;
+	private CancellationToken cancellationToken;
+	private static SynchronizationContext mainThreadContext;
 
-        void Awake()
-        {
-            mainThreadContext = SynchronizationContext.Current;
+	void Awake()
+	{
+		mainThreadContext = SynchronizationContext.Current;
 
-            if (_override == null) _override = new MaterialPropertyBlock();
+		if (_override == null) _override = new MaterialPropertyBlock();
 
-            tokenSource = new CancellationTokenSource();
-            cancellationToken = tokenSource.Token;
+		tokenSource = new CancellationTokenSource();
+		cancellationToken = tokenSource.Token;
 
-            Task.Run(ReceiveFrameTask, cancellationToken);
-        }
+		Task.Run(ReceiveFrameTask, cancellationToken);
 
-        void OnDestroy()
-        {
-            tokenSource?.Cancel();
-        
-            if (audioClip != null)
-            {
-                GameObject.Destroy(audioClip);
-            }
-        }
-        
-        void OnDisable() => ReleaseReceiverObjects();
+		UpdateAudioExpectations();
+		AudioSettings.OnAudioConfigurationChanged += AudioSettings_OnAudioConfigurationChanged;
+		CheckAudioSource();
+	}
 
-        #endregion
+	void OnDestroy()
+	{
+		tokenSource?.Cancel();
+		ReleaseReceiverObjects();
 
-        #region Receiver implementation
+		AudioSettings.OnAudioConfigurationChanged -= AudioSettings_OnAudioConfigurationChanged;
+		DestroyAudioSourceBridge();
+	}
 
-        void ReceiveFrameTask()
-        {
-            try
-            {
-                Debug.Log("Starting Task");
+	#endregion
 
-                // retrieve frames in a loop
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    PrepareInternalObjects();
+	#region Receiver implementation
 
-                    if (_recv == null)
-                    {
-                        Thread.Sleep(100);
-                        continue;
-                    }
+	void ReceiveFrameTask()
+	{
+		try
+		{
+			// retrieve frames in a loop
+			while (!cancellationToken.IsCancellationRequested)
+			{
+				PrepareInternalObjects();
 
-                    Interop.VideoFrame video;
-                    Interop.AudioFrame audio;
-                    Interop.MetadataFrame metadata;
+				if (_recv == null)
+				{
+					Thread.Sleep(100);
+					continue;
+				}
 
-                    var type = _recv.Capture(out video, out audio, out metadata, 5000);
-                    switch (type)
-                    {
-                        case Interop.FrameType.Audio:
-                            //Debug.Log($"received {type}: {audio}");
-                            FillAudioBuffer(audio);
-                            mainThreadContext.Post(ProcessAudioFrame, audio);
-                            break;
-                        case Interop.FrameType.Error:
-                            //Debug.Log($"received {type}: {video} {audio} {metadata}");
-                            mainThreadContext.Post(ProcessStatusChange, true);
-                            break;
-                        case Interop.FrameType.Metadata:
-                            //Debug.Log($"received {type}: {metadata}");
-                            mainThreadContext.Post(ProcessMetadataFrame, metadata);
-                            break;
-                        case Interop.FrameType.None:
-                            //Debug.Log($"received {type}");
-                            break;
-                        case Interop.FrameType.StatusChange:
-                            //Debug.Log($"received {type}: {video} {audio} {metadata}");
-                            mainThreadContext.Post(ProcessStatusChange, false);
-                            break;
-                        case Interop.FrameType.Video:
-                            //Debug.Log($"received {type}: {video}");
-                            mainThreadContext.Post(ProcessVideoFrame, video);
-                            break;
-                    }
-                }
+				Interop.VideoFrame video;
+				Interop.AudioFrame audio;
+				Interop.MetadataFrame metadata;
 
-                if (cancellationToken.IsCancellationRequested)
-                {
-                    Debug.Log("ReceiveFrameTask cancel requested.");
-                }
-            }
-            catch (System.Exception e)
-            {
-                Debug.LogException(e);
-            }
-            finally
-            {
-                ReleaseReceiverObjects();
-                Debug.Log("Good night.");
-            }
-        }
+				var type = _recv.Capture(out video, out audio, out metadata, 5000);
+				switch (type)
+				{
+					case Interop.FrameType.Audio:
+						//Debug.Log($"received {type}: {audio}");
+						FillAudioBuffer(audio);
+						mainThreadContext.Post(ProcessAudioFrame, audio);
+						break;
+					case Interop.FrameType.Error:
+						//Debug.Log($"received {type}: {video} {audio} {metadata}");
+						mainThreadContext.Post(ProcessStatusChange, true);
+						break;
+					case Interop.FrameType.Metadata:
+						//Debug.Log($"received {type}: {metadata}");
+						mainThreadContext.Post(ProcessMetadataFrame, metadata);
+						break;
+					case Interop.FrameType.None:
+						//Debug.Log($"received {type}");
+						break;
+					case Interop.FrameType.StatusChange:
+						//Debug.Log($"received {type}: {video} {audio} {metadata}");
+						mainThreadContext.Post(ProcessStatusChange, false);
+						break;
+					case Interop.FrameType.Video:
+						//Debug.Log($"received {type}: {video}");
+						mainThreadContext.Post(ProcessVideoFrame, video);
+						break;
+				}
+			}
+		}
+		catch (System.Exception e)
+		{
+			Debug.LogException(e);
+		}
+	}
 
-        void ProcessVideoFrame(System.Object data)
-        {
-            Interop.VideoFrame videoFrame = (Interop.VideoFrame)data;
+	void ProcessVideoFrame(System.Object data)
+	{
+		Interop.VideoFrame videoFrame = (Interop.VideoFrame)data;
 
-            if (_recv == null) return;
+		if (_recv == null) return;
 
-            // Pixel format conversion
-            var rt = _converter.Decode
-                (videoFrame.Width, videoFrame.Height,
-                Util.HasAlpha(videoFrame.FourCC), videoFrame.Data);
+		// Pixel format conversion
+		var rt = _converter.Decode
+			(videoFrame.Width, videoFrame.Height,
+			Util.HasAlpha(videoFrame.FourCC), videoFrame.Data);
 
-            // Copy the metadata if any.
-            metadata = videoFrame.Metadata;
+		// Copy the metadata if any.
+		metadata = videoFrame.Metadata;
 
-            // Free the frame up.
-            _recv.FreeVideoFrame(videoFrame);
+		// Free the frame up.
+		_recv.FreeVideoFrame(videoFrame);
 
-            if (rt == null) return;
+		if (rt == null) return;
 
-            // Material property override
-            if (_targetRenderer != null)
-            {
-                _targetRenderer.GetPropertyBlock(_override);
-                _override.SetTexture(_targetMaterialProperty, rt);
-                _targetRenderer.SetPropertyBlock(_override);
-            }
+		// Material property override
+		if (_targetRenderer != null)
+		{
+			_targetRenderer.GetPropertyBlock(_override);
+			_override.SetTexture(_targetMaterialProperty, rt);
+			_targetRenderer.SetPropertyBlock(_override);
+		}
 
-            // External texture update
-            if (_targetTexture != null)
-                Graphics.Blit(rt, _targetTexture);
-        }
+		// External texture update
+		if (_targetTexture != null)
+			Graphics.Blit(rt, _targetTexture);
+	}
 
-        void ProcessAudioFrame(System.Object data)
-        {
-	        Interop.AudioFrame audioFrame = (Interop.AudioFrame)data;
+	void ProcessAudioFrame(System.Object data)
+	{
+		Interop.AudioFrame audioFrame = (Interop.AudioFrame)data;
 
-	        if (_recv == null) return;
+		if (_recv == null) return;
 
-	        _recv.FreeAudioFrame(audioFrame);
-        }
+		_recv.FreeAudioFrame(audioFrame);
+	}
 
-        void ProcessMetadataFrame(System.Object data)
-        {
-            Interop.MetadataFrame metadataFrame = (Interop.MetadataFrame)data;
 
-            if (_recv == null) return;
+	void ProcessMetadataFrame(System.Object data)
+	{
+		Interop.MetadataFrame metadataFrame = (Interop.MetadataFrame)data;
 
-            // broadcast an event that new metadata has arrived?
+		if (_recv == null) return;
 
-            Debug.Log($"ProcessMetadataFrame: {metadataFrame.Data}");
+		// broadcast an event that new metadata has arrived?
 
-            _recv.FreeMetadataFrame(metadataFrame);
-        }
+		Debug.Log($"ProcessMetadataFrame: {metadataFrame.Data}");
 
-        void ProcessStatusChange(System.Object data)
-        {
-            bool error = (bool)data;
+		_recv.FreeMetadataFrame(metadataFrame);
+	}
 
-            // broadcast an event that we've received/lost stream?
+	void ProcessStatusChange(System.Object data)
+	{
+		bool error = (bool)data;
 
-            Debug.Log($"ProcessStatusChange error = {error}");
-        }
+		// broadcast an event that we've received/lost stream?
 
-        #endregion
+		Debug.Log($"ProcessStatusChange error = {error}");
+	}
 
-        #region Audio Public Methods
+	#endregion
 
-        public float Volume
-        {
-            get
-            {
-                return (audioSource != null) ? audioSource.volume : -1;
-            }
-            set
-            {
-                if (audioSource != null)
-                    audioSource.volume = value;
-            }
-        }
-        #endregion
-
-        #region Audio implementation
+	#region Audio implementation
 
 	private readonly object					audioBufferLock = new object();
 	private const int						BUFFER_SIZE = 1024 * 32;

@@ -21,6 +21,7 @@ sealed class NdiReceiverEditor : UnityEditor.Editor
     AutoProperty _targetTexture;
     AutoProperty _targetRenderer;
     AutoProperty _targetMaterialProperty;
+    AutoProperty _audioSource;
 
     #pragma warning restore
 
@@ -89,6 +90,8 @@ sealed class NdiReceiverEditor : UnityEditor.Editor
         }
 
         EditorGUI.indentLevel--;
+        
+        EditorGUILayout.PropertyField(_audioSource);
 
         serializedObject.ApplyModifiedProperties();
     }
