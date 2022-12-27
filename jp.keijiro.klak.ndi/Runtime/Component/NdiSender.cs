@@ -267,7 +267,7 @@ namespace Klak.Ndi {
                 {
                     for (int i = 0; i < numSamples; i++)
                     {
-                        samples[numSamples * ch + i] = data[i * numChannels];
+                        samples[numSamples * ch + i] = data[i * numChannels + ch];
                     }
                 }
 
